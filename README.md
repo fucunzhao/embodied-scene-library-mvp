@@ -1,16 +1,68 @@
-# Fieldbook 具身智能场景库 MVP
+# Fieldbook 具身智能场景库 · 可持久上传版
 
-静态前端演示入口：`index.html`（`embodied-scene-mvp.html` 为本地演示副本）。
+Node.js 24 + SQLite + 持久存储空间，前后端同一个服务，无 npm 依赖。
+现在必须通过服务器访问，不能双击 HTML 运行。旧的浏览器演示数据不会自动迁移；初始场景库为空，供应商申报审核通过后才会出现真实场景。
 
-## 演示账号
+## 已实现
 
-- 管理员：`linxiao@fieldbook.ai`
-- 供应商：`ops@lingjing.example`
-- 客户：`procurement@xinglan.example`
-- 演示密码：`fieldbook2026`
+- 服务端登录、退出，HttpOnly 会话 Cookie，密码 scrypt 加盐散列，账号停用立即撤销会话。
+- 管理员创建供应商、客户、内部运营账号及设置密码。
+- 供应商图片/视频流式上传，进度显示，上传完成提交场景申报，失败后在同一表单内重试复用已上传文件。
+- 图片每张20MB、视频每段500MB；每类最多20个；校验文件类型和文件头。
+- 待审核素材仅申报者与内部人员可访问。客户只看到审核通过的场景和素材。
+- 内部图片预览、视频播放，审核通过或退回及理由；供应商修改退回的申报后重提。
+- 任务创建、公开领取、按真实供应商账号指派、开始采集、内部推进到验收交付；并发领取只能有一人成功。
+- 客户询盘及账号之间的数据隔离。
+- 视频 HTTP Range 支持；建议上传 H.264/AAC MP4，MOV/WebM 是否能播放取决于浏览器和编码，本版不转码。
 
-## 生产部署建议
+## Zeabur 部署（首次部署前必须配置）
 
-项目已提供 `Dockerfile` 和 Nginx 配置，可直接作为 Zeabur Git 服务部署，容器监听 `8080` 端口。应用服务器负责身份认证、业务数据和上传签名；图片及视频存入对象存储，不能提交到 Git 仓库或保存在应用容器的本地磁盘。
+1. 选择服务器并建立项目。服务器购买费用由账号所有者确认。
+2. 导入 GitHub 仓库 `fucunzhao/embodied-scene-library-mvp`，分支 `main`，使用根目录 Dockerfile。
+3. **挂载持久存储：Volume ID `fieldbook-data`，挂载目录 `/data`。**
+4. 在服务环境变量中添加以下内容，再部署或重启：
 
-详细环境与存储配置请见项目交付说明。
+| 变量 | 值 / 用途 |
+| --- | --- |
+| `ADMIN_EMAIL` | 首次初始化的管理员登录邮箱 |
+| `ADMIN_PASSWORD` | 自行设置至少12位强密码，不使用旧演示密码 |
+| `DATA_DIR` | `/data`（Dockerfile 默认值） |
+| `PORT` | `8080`（Dockerfile 默认值） |
+| `STORAGE_QUOTA_GB` | `20`，文件总配额，按实际磁盘容量调整并留出数据库/系统余量 |
+| `MAX_VIDEO_MB` | `500`，单视频上限；前端上限亦为500MB |
+| `APP_ORIGIN` | 可选，公开域名生成后设置完整 `https://域名`，限制写请求来源 |
+
+5. 为8080端口生成 HTTPS 公共域名。访问 `/api/health` 应返回 `{"ok":true}`。
+6. 用管理员登录，创建供应商与客户账号。通过安全渠道把账号密码交给使用者；本版不发送邀请邮件。
+7. 供应商上传图片和视频、提交申报；管理员预览并通过；客户登录检查场景库和播放素材。
+8. 重启服务，重复访问素材，确认挂载持久存储确实生效。
+
+官方说明：[Dockerfile 部署](https://zeabur.com/docs/en-US/deploy/methods/dockerfile)、[持久存储](https://zeabur.com/docs/en-US/data-management/volumes)、[环境变量](https://zeabur.com/docs/en-US/deploy/config/environment-variables)。
+
+### 数据和备份
+
+数据库 `/data/fieldbook.sqlite`；图片与视频 `/data/media/<UUID>`。二者均在持久卷，更新镜像不会删除数据；未挂载持久卷时，重建服务可能丢失数据。
+这是单实例、小规模运营方案；保持副本数为1，SQLite与文件在同一服务上。图片视频没有写入Git，也没有使用浏览器localStorage。
+持久卷不是备份：定期停止服务并备份完整 `/data` 目录到独立存储位置，恢复时将完整目录还原到同一挂载路径。不要只复制正在运行的SQLite主文件（WAL可能包含尚未合并的数据）。
+上传未提交的素材仍占配额；本版没有素材删除与自动垃圾回收功能。大规模视频库、多个服务副本或需要CDN时，应迁移素材到S3兼容对象存储、业务数据库到PostgreSQL。
+首次管理员只在空数据库时由环境变量创建；后续改环境变量不会重置已有密码，应在账号管理中修改。
+
+## 本地运行和验证
+
+PowerShell（Node.js 24或更新版本）：
+
+```powershell
+$env:ADMIN_EMAIL='填写管理员邮箱'
+$env:ADMIN_PASSWORD='填写至少12位的强密码'
+node server.js
+```
+
+访问 `http://localhost:8080`。本地默认数据目录 `data/`；请勿提交数据目录或密码。
+
+```powershell
+node --check server.js
+node --check backend-client.js
+node test-server.cjs
+```
+
+集成测试使用独立临时数据库和测试账号，覆盖真实HTTP上传、权限隔离、审核发布、退回重提、视频Range响应、任务下发与并发领取、重启持久性、账号停用和退出。测试文件夹被Git忽略。

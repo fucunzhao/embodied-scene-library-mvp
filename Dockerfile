@@ -1,6 +1,8 @@
-FROM nginx:1.27-alpine
-
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY index.html /usr/share/nginx/html/index.html
-
+FROM node:24-alpine
+WORKDIR /app
+COPY server.js index.html backend-client.js docker-entrypoint.sh ./
+ENV NODE_ENV=production PORT=8080 DATA_DIR=/data
+RUN apk add --no-cache su-exec && mkdir /data && chown node:node /data
 EXPOSE 8080
+ENTRYPOINT ["sh", "/app/docker-entrypoint.sh"]
+CMD ["node", "server.js"]

@@ -1,3 +1,11 @@
 .git
 README.md
 embodied-scene-mvp.html
+data
+test-data
+test-data-*
+preview-data
+.env
+*.sqlite*
+test-server.cjs
+upgrade-html.cjs

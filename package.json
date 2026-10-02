@@ -1,0 +1,7 @@
+{
+  "name": "embodied-scene-library",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": { "start": "node server.js", "test": "node test-server.cjs" },
+  "engines": { "node": ">=24" }
+}

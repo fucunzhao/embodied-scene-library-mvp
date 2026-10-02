@@ -1,0 +1,6 @@
+data/
+test-data/
+test-data-*/
+preview-data/
+.env
+*.sqlite*
