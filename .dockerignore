@@ -8,4 +8,5 @@ preview-data
 .env
 *.sqlite*
 test-server.cjs
+test-media.cjs
 upgrade-html.cjs

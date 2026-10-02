@@ -1,0 +1,35 @@
+'use strict';
+// Optional DOM test dependency: npm install --no-save --prefix test-data-ui jsdom
+const {JSDOM,VirtualConsole}=require('./test-data-ui/node_modules/jsdom');
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const tick=()=>new Promise(r=>setTimeout(r,0));
+(async()=>{
+ const errors=[],vc=new VirtualConsole();vc.on('jsdomError',e=>errors.push(e.message));
+ const dom=new JSDOM('<!doctype html><body><header>场景库</header><main>原场景</main><div id="modal" class="open"><div id="modalContent"><h2>厨房场景</h2><div class="gallery"><img src="/media/photo1"><img src="/media/photo2"><video src="/media/video1"></video></div></div></div></body>',{url:'http://localhost',runScripts:'dangerously',virtualConsole:vc});
+ const w=dom.window,d=w.document;let pauses=0,loads=0,fullscreenTarget=null;
+ w.HTMLMediaElement.prototype.pause=function(){pauses++;};w.HTMLMediaElement.prototype.load=function(){loads++;};
+ w.HTMLElement.prototype.scrollIntoView=function(){};
+ w.HTMLElement.prototype.requestFullscreen=async function(){fullscreenTarget=this;};
+ w.eval(fs.readFileSync(path.join(__dirname,'media-viewer.js'),'utf8'));await tick();
+ const viewer=d.querySelector('.media-viewer'),cards=d.querySelectorAll('.media-card'),command=n=>viewer.querySelector(`[data-command="${n}"]`),stage=viewer.querySelector('.media-stage');
+ assert.equal(cards.length,3);assert.match(cards[0].getAttribute('aria-label'),/放大/);assert.match(cards[2].textContent,/全屏/);
+ cards[0].focus();cards[0].click();assert.equal(viewer.hidden,false);assert.equal(d.body.style.overflow,'hidden');assert.equal(d.querySelector('#modal').inert,true);assert.equal(d.activeElement,command('close'));assert.equal(command('prev').disabled,true);
+ const image=viewer.querySelector('img');Object.defineProperty(image,'naturalWidth',{value:1000});Object.defineProperty(image,'naturalHeight',{value:500});Object.defineProperty(stage,'clientWidth',{value:824});Object.defineProperty(stage,'clientHeight',{value:624});image.dispatchEvent(new w.Event('load'));
+ assert.equal(image.style.width,'800px');command('zoomIn').click();assert.equal(image.style.width,'1200px');assert.equal(viewer.querySelector('#mediaZoom').textContent,'150%');image.dispatchEvent(new w.Event('dblclick'));assert.equal(image.style.width,'800px');
+ for(let i=0;i<20;i++)command('zoomIn').click();assert.equal(viewer.querySelector('#mediaZoom').textContent,'500%');assert.equal(command('zoomIn').disabled,true);command('fit').click();assert.equal(command('zoomOut').disabled,true);
+ d.dispatchEvent(new w.KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true,cancelable:true}));assert.match(viewer.querySelector('#mediaCount').textContent,/现场图片 2/);
+ viewer.querySelector('img').dispatchEvent(new w.Event('error'));assert.match(viewer.querySelector('.media-feedback').textContent,/重新加载/);viewer.querySelector('.media-feedback button').click();assert.match(viewer.querySelector('.media-feedback').textContent,/加载中/);
+ command('next').click();const video=viewer.querySelector('video');assert.ok(video.controls);assert.equal(video.hasAttribute('autoplay'),false);assert.ok(video.playsInline);assert.equal(command('zoomIn').hidden,true);assert.equal(command('next').disabled,true);
+ Object.defineProperty(video,'duration',{value:120});video.currentTime=25;video.dispatchEvent(new w.Event('loadedmetadata'));assert.match(viewer.querySelector('.media-feedback').textContent,/关闭或切换会暂停/);command('fullscreen').click();await tick();assert.equal(fullscreenTarget,video);
+ command('prev').click();assert.ok(pauses>0&&loads>0);command('next').click();const resumed=viewer.querySelector('video');Object.defineProperty(resumed,'duration',{value:120});resumed.dispatchEvent(new w.Event('loadedmetadata'));assert.equal(resumed.currentTime,25);
+ resumed.requestFullscreen=undefined;resumed.webkitEnterFullscreen=undefined;command('fullscreen').click();await tick();assert.match(viewer.querySelector('.media-feedback').textContent,/不支持原生全屏/);
+ resumed.requestFullscreen=async()=>{throw new Error('denied');};command('fullscreen').click();await tick();assert.match(viewer.querySelector('.media-feedback').textContent,/全屏请求未成功/);
+ resumed.dispatchEvent(new w.Event('error'));assert.match(viewer.querySelector('.media-feedback').textContent,/编码不受/);
+ command('close').focus();command('close').dispatchEvent(new w.KeyboardEvent('keydown',{key:'Tab',shiftKey:true,bubbles:true,cancelable:true}));assert.equal(d.activeElement,viewer.querySelector('.media-strip button:last-child'));
+ d.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));assert.equal(viewer.hidden,true);assert.equal(d.body.style.overflow,'');assert.equal(d.querySelector('#modal').inert,undefined);assert.equal(d.querySelector('#modal').getAttribute('aria-hidden'),null);assert.equal(d.activeElement,cards[0]);assert.equal(viewer.querySelector('video'),null);
+ cards[0].click();const touch=(name,touches,changedTouches=[])=>{const event=new w.Event(name,{bubbles:true,cancelable:true});Object.defineProperty(event,'touches',{value:touches});Object.defineProperty(event,'changedTouches',{value:changedTouches});stage.dispatchEvent(event);};
+ touch('touchstart',[{clientX:200,clientY:100}]);touch('touchend',[],[{clientX:100,clientY:103}]);assert.match(viewer.querySelector('#mediaCount').textContent,/现场图片 2/);
+ touch('touchstart',[{clientX:0,clientY:0},{clientX:100,clientY:0}]);touch('touchmove',[{clientX:0,clientY:0},{clientX:200,clientY:0}]);assert.equal(viewer.querySelector('#mediaZoom').textContent,'200%');touch('touchend',[]);
+ d.querySelector('#modal').classList.remove('open');await tick();assert.equal(viewer.hidden,true);assert.deepEqual(errors,[]);
+ dom.window.close();console.log('PASS media UI: accessible cards, keyboard/focus isolation and restoration, fitted image zoom limits/reset, touch swipe/pinch, retry, video controls/no autoplay, playback position/pause cleanup, fullscreen/fallback, nested modal close. Native playback/fullscreen rendering requires real browser validation.');
+})().catch(e=>{console.error(e);process.exitCode=1;});

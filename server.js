@@ -130,7 +130,7 @@ const server=http.createServer(async(req,res)=>{
    if(url.pathname==='/api/action'&&req.method==='POST'){const b=await body(req);db.exec('BEGIN IMMEDIATE');try{const result=action(a,b.action,b.data||{});db.exec('COMMIT');return json(res,200,result);}catch(e){db.exec('ROLLBACK');throw e;}}
    const m=/^\/media\/([a-f0-9-]{36})$/.exec(url.pathname);if(m&&['GET','HEAD'].includes(req.method))return serveMedia(req,res,a,m[1]);fail(404,'接口不存在');
   }
-  const file={'/':'index.html','/index.html':'index.html','/embodied-scene-mvp.html':'index.html','/backend-client.js':'backend-client.js'}[url.pathname];if(!file||!['GET','HEAD'].includes(req.method))fail(404,'页面不存在');res.writeHead(200,{'Content-Type':file.endsWith('.js')?'text/javascript; charset=utf-8':'text/html; charset=utf-8','Cache-Control':'no-store'});if(req.method==='HEAD')return res.end();fs.createReadStream(path.join(__dirname,file)).pipe(res);
+  const file={'/':'index.html','/index.html':'index.html','/embodied-scene-mvp.html':'index.html','/backend-client.js':'backend-client.js','/media-viewer.js':'media-viewer.js','/media-viewer.css':'media-viewer.css'}[url.pathname];if(!file||!['GET','HEAD'].includes(req.method))fail(404,'页面不存在');res.writeHead(200,{'Content-Type':file.endsWith('.js')?'text/javascript; charset=utf-8':file.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8','Cache-Control':'no-store'});if(req.method==='HEAD')return res.end();fs.createReadStream(path.join(__dirname,file)).pipe(res);
  }catch(e){if(!res.headersSent&&!res.destroyed)json(res,e.status||500,{error:e.status?e.message:'服务器处理失败，请联系管理员'});else res.destroy();if(!e.status)console.error(e);}
 });
 server.requestTimeout=30*60*1000;

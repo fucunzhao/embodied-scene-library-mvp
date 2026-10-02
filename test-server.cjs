@@ -11,6 +11,7 @@ const post=(cookie,action,data)=>request('/api/action',{method:'POST',headers:{C
 const read=cookie=>request('/api/state',{headers:{Cookie:cookie}});
 (async()=>{try{
  await start();assert.equal((await request('/api/health')).status,200);assert.equal((await request('/api/state')).status,401);
+ assert.match((await request('/media-viewer.css')).headers.get('content-type'),/text\/css/);assert.match((await request('/media-viewer.js')).headers.get('content-type'),/javascript/);
  const publicInitial=(await request('/api/public')).body;assert.deepEqual(publicInitial.scenes,[]);assert.equal(publicInitial.accounts,undefined);assert.equal(publicInitial.businessContact.phone,'18276783993');
  const admin=await login('admin@test.example');assert.ok(admin);assert.equal((await read(admin)).body.me.passwordHash,undefined);
  assert.equal((await post(admin,'businessContact',{name:'负责人',link:'javascript:alert(1)'})).status,400);
