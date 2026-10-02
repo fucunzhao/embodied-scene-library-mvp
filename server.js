@@ -25,11 +25,14 @@ const internal=a=>['平台管理员','内部运营'].includes(a.role);
 function permit(a,roles){if(!roles.includes(a.role))fail(403,'当前账号没有此操作权限');}
 // Legacy scenes have no lifecycle fields and remain enabled without a destructive migration.
 const scenePublished=s=>!!s&&!s.deletedAt&&s.enabled!==false;
+const defaultContact={id:'business',name:'傅存诏',account:'',link:'https://www.feishu.cn/invitation/page/add_contact/?token=71cr8251-f3c0-45cd-9fd2-b5c78a10032b&unique_id=Pciprz9Ix9KtDar8uR94MA=='};
+function businessContact(){const c=get('settings','business')||defaultContact;return {name:c.name,account:c.account,link:c.link,phone:c.phone??'18276783993',wechat:c.wechat??'18276783993'};}
+function publicState(){return {scenes:all('scenes').filter(scenePublished).map(s=>Object.fromEntries(['id','name','industry','status','place','task','data','cycle','scale','type','tags','desc','photos','videos'].map(k=>[k,s[k]]))),businessContact:businessContact()};}
 function state(a){
  const sceneList=all('scenes'), visible=sceneList.filter(s=>!s.deletedAt&&(internal(a)||scenePublished(s)));
  const poolVisible=t=>t.stage==='待领取'&&scenePublished(get('scenes',t.sceneId));
  const inquiryList=internal(a)?all('inquiries'):all('inquiries').filter(x=>x.ownerId===a.id);
- return{me:safe(a),scenes:visible,archivedScenes:a.role==='平台管理员'?sceneList.filter(s=>s.deletedAt):[],
+ return{me:safe(a),businessContact:businessContact(),scenes:visible,archivedScenes:a.role==='平台管理员'?sceneList.filter(s=>s.deletedAt):[],
   applications:internal(a)?all('applications'):all('applications').filter(x=>x.ownerId===a.id),
   tasks:internal(a)?all('tasks'):a.role==='供应商'?all('tasks').filter(t=>poolVisible(t)||t.supplierId===a.id):[],
   inquiries:inquiryList.map(x=>({...x,sceneName:x.sceneName||get('scenes',x.sceneId)?.name||'已归档场景'})),
@@ -38,6 +41,12 @@ function state(a){
 function mediaRefs(urls,a,kind){if(!Array.isArray(urls)||urls.length>20)fail(400,'每类素材最多20个');return urls.map(url=>{const key=/^\/media\/([a-f0-9-]{36})$/.exec(url)?.[1],m=key&&db.prepare('SELECT * FROM media WHERE id=?').get(key);if(!m||m.owner!==a.id||!m.mime.startsWith(kind+'/'))fail(400,'素材不存在或不属于当前账号');return url;});}
 const scopes={'平台管理员':'全部权限','内部运营':'场景审核、任务管理','供应商':'申报、领取与执行任务','客户':'场景库、询盘'};
 function action(a,name,b){
+ if(name==='businessContact'){
+  permit(a,['平台管理员']);const name=value(b.name,'联系人',100),contactAccount=String(b.account||'').trim();if(contactAccount.length>200)fail(400,'飞书账号过长');const link=String(b.link||'').trim();
+  if(link){let parsed;try{parsed=new URL(link);}catch{fail(400,'请输入有效的飞书联系人链接');}if(parsed.protocol!=='https:'||!['feishu.cn','larksuite.com'].some(d=>parsed.hostname===d||parsed.hostname.endsWith('.'+d))||parsed.username||parsed.password||link.length>2000)fail(400,'仅支持 HTTPS 飞书或 Lark 链接');}
+  const phone=String(b.phone||'').trim(),wechat=String(b.wechat||'').trim();if(phone&&!/^[+\d ()-]{5,40}$/.test(phone))fail(400,'联系电话格式无效');if(wechat.length>100)fail(400,'微信账号过长');
+  if(!link&&!contactAccount&&!phone&&!wechat)fail(400,'请至少填写一种联系方式');put('settings',{id:'business',name,account:contactAccount,link,phone,wechat});return businessContact();
+ }
  if(['sceneEdit','sceneToggle','sceneDelete','sceneRestore'].includes(name)){
   permit(a,['平台管理员']);
   const scene=get('scenes',b.id);if(!scene)fail(404,'场景不存在');
@@ -100,7 +109,7 @@ async function upload(req,res,a,url){
  finally{activeUploads--;reservedBytes-=declared;}
 }
 function serveMedia(req,res,a,key){
- const m=db.prepare('SELECT * FROM media WHERE id=?').get(key);if(!m)fail(404,'素材不存在');const url='/media/'+key,published=all('scenes').some(x=>scenePublished(x)&&[...(x.photos||[]),...(x.videos||[])].includes(url));if(!internal(a)&&m.owner!==a.id&&!published)fail(403,'素材未公开、场景已下架或不属于当前账号');const file=path.join(mediaDir,key);if(!fs.existsSync(file))fail(404,'素材文件缺失');let start=0,end=m.size-1,status=200;
+ const m=db.prepare('SELECT * FROM media WHERE id=?').get(key);if(!m)fail(404,'素材不存在');const url='/media/'+key,published=all('scenes').some(x=>scenePublished(x)&&[...(x.photos||[]),...(x.videos||[])].includes(url));if(!published&&(!a||(!internal(a)&&m.owner!==a.id)))fail(403,'素材未公开、场景已下架或不属于当前账号');const file=path.join(mediaDir,key);if(!fs.existsSync(file))fail(404,'素材文件缺失');let start=0,end=m.size-1,status=200;
  if(req.headers.range){const r=/^bytes=(\d*)-(\d*)$/.exec(req.headers.range);if(!r||(!r[1]&&!r[2])){res.writeHead(416,{'Content-Range':`bytes */${m.size}`});return res.end();}start=r[1]?Number(r[1]):Math.max(0,m.size-Number(r[2]));if(r[1]&&r[2])end=Math.min(end,Number(r[2]));if(start>end||start>=m.size){res.writeHead(416,{'Content-Range':`bytes */${m.size}`});return res.end();}status=206;}
  const headers={'Content-Type':m.mime,'Content-Length':end-start+1,'Accept-Ranges':'bytes','Cache-Control':'private, no-store','Content-Disposition':'inline'};if(status===206)headers['Content-Range']=`bytes ${start}-${end}/${m.size}`;res.writeHead(status,headers);if(req.method==='HEAD')return res.end();fs.createReadStream(file,{start,end}).on('error',()=>res.destroy()).pipe(res);
 }
@@ -112,6 +121,8 @@ const server=http.createServer(async(req,res)=>{
    const k=req.socket.remoteAddress,last=attempts.get(k);if(last&&last.until>Date.now()&&last.count>=20)fail(429,'尝试次数过多，请15分钟后重试');const b=await body(req),a=all('accounts').find(x=>x.email===String(b.email).trim().toLowerCase());if(!a||a.status!=='启用'||!matches(b.password,a.passwordHash)){attempts.set(k,{count:last?.until>Date.now()?last.count+1:1,until:Date.now()+900000});fail(401,'邮箱、密码错误或账号已停用');}attempts.delete(k);const t=crypto.randomBytes(32).toString('hex');db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(digest(t),a.id,Date.now()+86400000);res.setHeader('Set-Cookie',`fb_session=${t}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400${process.env.NODE_ENV==='production'?'; Secure':''}`);return json(res,200,{me:safe(a)});
   }
   if(url.pathname==='/api/logout'&&req.method==='POST'){const t=token(req);if(t)db.prepare('DELETE FROM sessions WHERE token=?').run(digest(t));res.setHeader('Set-Cookie','fb_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');return json(res,200,{ok:true});}
+  if(url.pathname==='/api/public'&&req.method==='GET')return json(res,200,publicState());
+  const publicMedia=/^\/media\/([a-f0-9-]{36})$/.exec(url.pathname);if(publicMedia&&['GET','HEAD'].includes(req.method))return serveMedia(req,res,account(req),publicMedia[1]);
   if(url.pathname.startsWith('/api/')||url.pathname.startsWith('/media/')){
    const a=account(req);if(!a)fail(401,'请先登录');if(url.pathname==='/api/state'&&req.method==='GET')return json(res,200,state(a));
    if(url.pathname==='/api/suppliers'&&req.method==='GET'){if(!internal(a))fail(403,'没有权限');return json(res,200,all('accounts').filter(x=>x.role==='供应商'&&x.status==='启用').map(x=>({id:x.id,name:x.name,org:x.org})));}
