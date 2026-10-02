@@ -1,11 +1,13 @@
 // Business writes are authorized and persisted by the server, never by browser storage.
+let archivedScenes=[], internalTab='plan', sceneListFilter='current';
+function isPlatformAdmin(){return accounts.find(a=>a.id===session?.accountId)?.role==='平台管理员';}
 async function api(url, data) {
  const r=await fetch(url,{method:data===undefined?'GET':'POST',credentials:'same-origin',headers:data===undefined?{}:{'Content-Type':'application/json'},body:data===undefined?undefined:JSON.stringify(data)});
  const result=await r.json();if(!r.ok){const error=new Error(result.error||'请求失败');error.status=r.status;throw error;}return result;
 }
-function clearState(){session=null;role='client';scenes=[];applications=[];tasks=[];inquiries=[];accounts=[];renderAll();}
-async function refreshState(){const s=await api('/api/state');session={accountId:s.me.id};role=roleFromAccount(s.me);scenes=s.scenes;applications=s.applications;tasks=s.tasks;inquiries=s.inquiries;accounts=s.accounts;renderAll();}
-async function perform(name,data,options={}){try{const r=await api('/api/action',{action:name,data});if(options.close)closeModal();await refreshState();if(options.tab){const buttons=document.querySelectorAll('.tabs button');const ix=options.tab==='accounts'?3:1;showInternalTab(options.tab,buttons[ix]);}return r;}catch(e){if(e.status===401){clearState();openLogin();}alert(e.message);return null;}}
+function clearState(){session=null;role='client';scenes=[];archivedScenes=[];internalTab='plan';applications=[];tasks=[];inquiries=[];accounts=[];renderAll();}
+async function refreshState(){const s=await api('/api/state');session={accountId:s.me.id};role=roleFromAccount(s.me);scenes=s.scenes;archivedScenes=s.archivedScenes||[];applications=s.applications;tasks=s.tasks;inquiries=s.inquiries;accounts=s.accounts;renderAll();}
+async function perform(name,data,options={}){try{const r=await api('/api/action',{action:name,data});if(options.close)closeModal();await refreshState();if(options.tab){const buttons=document.querySelectorAll('.tabs button');const ix={accounts:3,scenes:4,audit:1}[options.tab]??1;showInternalTab(options.tab,buttons[ix]);}return r;}catch(e){if(e.status===401){clearState();openLogin();}else if(e.status===409)await refreshState().catch(()=>{});alert(e.message);return null;}}
 save=()=>{};
 setRole=()=>{if(session)refreshState().catch(e=>alert(e.message));};
 openLogin=function(){document.getElementById('modalContent').innerHTML=`<div class="kicker" style="color:var(--green)">Fieldbook sign in</div><h2>登录场景库</h2><p class="muted">使用管理员为您开通的账号登录。</p><form class="form" onsubmit="login(event)"><div class="field"><label>登录邮箱</label><input name="email" type="email" autocomplete="username" required></div><div class="field" style="margin-top:12px"><label>密码</label><input name="password" type="password" autocomplete="current-password" required></div><div id="loginError" role="alert" class="help" style="color:#a23d3b"></div><button class="primary" style="margin-top:10px">登录</button></form>`;document.getElementById('modal').classList.add('open');};
@@ -41,6 +43,54 @@ supplierHTML=function(){const available=tasks.filter(t=>t.stage==='待领取'),c
 supplierClaimedPanel=function(){const list=tasks.filter(t=>t.supplierId===session?.accountId);return list.length?`<table class="table"><thead><tr><th>任务</th><th>计划</th><th>状态</th><th>操作</th></tr></thead><tbody>${list.map(t=>`<tr><td>${esc(t.name)}</td><td>${esc(t.date)}</td><td>${esc(t.stage)}</td><td>${t.stage==='已排期'?`<button class="small-btn" onclick="supplierStart('${t.id}')">开始执行</button>`:''}<button class="small-btn" onclick="taskDetail('${t.id}')">详情</button></td></tr>`).join('')}</tbody></table>`:'<div class="empty">尚未领取或获指派任务。</div>';};
 supplierMinePanel=function(){return applications.length?`<table class="table"><thead><tr><th>场景</th><th>素材</th><th>审核状态</th><th>操作</th></tr></thead><tbody>${applications.map(a=>`<tr><td>${esc(a.name)}<br><small>${esc(a.place)}</small></td><td>${a.photos.length}图 / ${a.videos.length}视频</td><td>${esc(a.status)}<br><small>${esc(a.reviewNote||'')}</small></td><td><button class="small-btn" onclick="appDetail('${a.id}')">查看</button>${a.status==='已退回'?` <button class="small-btn" onclick="openApplyForm('${a.id}')">修改重提</button>`:''}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">尚未申报场景。</div>';};
 const originalRenderAll=renderAll;
-renderAll=function(){originalRenderAll();const me=accounts.find(x=>x.id===session?.accountId);document.querySelector('.logout').textContent=me?'退出登录':'登录';document.querySelector('.logout').onclick=me?logout:openLogin;if(role==='internal'&&me?.role!=='平台管理员'){const tab=document.querySelector('.tabs button:nth-child(4)');if(tab)tab.style.display='none';}document.querySelectorAll('.gallery video').forEach(v=>v.preload='metadata');};
+renderAll=function(){originalRenderAll();const me=accounts.find(x=>x.id===session?.accountId);document.querySelector('.logout').textContent=me?'退出登录':'登录';document.querySelector('.logout').onclick=me?logout:openLogin;if(role==='internal'&&me?.role!=='平台管理员'){const tab=document.querySelector('.tabs button:nth-child(4)');if(tab)tab.style.display='none';}if(role==='internal'&&internalTab!=='plan'){const ix={audit:1,inquiries:2,accounts:3,scenes:4}[internalTab];const button=document.querySelectorAll('.tabs button')[ix];if(button&&(internalTab!=='scenes'||isPlatformAdmin())&&(internalTab!=='accounts'||isPlatformAdmin()))showInternalTab(internalTab,button);}document.querySelectorAll('.gallery video').forEach(v=>v.preload='metadata');};
+
+const originalInternalHTML=internalHTML;
+internalHTML=function(){const html=originalInternalHTML();return isPlatformAdmin()?html.replace('</div><div id="internalPanel">',`<button data-internal-tab="scenes" onclick="showInternalTab('scenes',this)">场景管理 ${scenes.length}</button></div><div id="internalPanel">`):html;};
+const originalInternalTab=showInternalTab;
+showInternalTab=function(kind,button){
+ if(!button)return;
+ if(kind==='scenes'){
+  if(!isPlatformAdmin())return;
+  internalTab=kind;document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));button.classList.add('active');document.getElementById('internalPanel').innerHTML=sceneManagementPanel();
+ }else{internalTab=kind;originalInternalTab(kind,button);}
+};
+function sceneLifecycle(s){return s.deletedAt?'已删除':s.enabled===false?'已停用':'已启用';}
+function managedScene(id){return [...scenes,...archivedScenes].find(s=>s.id===id);}
+function sceneManagementPanel(){
+ let list=sceneListFilter==='deleted'?archivedScenes:scenes;
+ if(sceneListFilter==='enabled')list=list.filter(s=>s.enabled!==false);
+ if(sceneListFilter==='disabled')list=list.filter(s=>s.enabled===false);
+ return `<div class="notice">停用或删除后，客户场景库不再展示该场景，也不能通过原素材链接访问。图片、视频及历史任务保留；已领取任务可继续执行。删除的场景可恢复，恢复后默认停用。</div><div class="section-head"><h2>场景管理</h2><select aria-label="场景管理筛选" class="filter" onchange="filterManagedScenes(this.value)">${[['current','全部未删除'],['enabled','已启用'],['disabled','已停用'],['deleted','已删除（可恢复）']].map(([v,n])=>`<option value="${v}" ${sceneListFilter===v?'selected':''}>${n}</option>`).join('')}</select></div>${list.length?`<div style="overflow-x:auto"><table class="table"><thead><tr><th>场景 / 环境</th><th>行业 / 素材</th><th>发布状态</th><th>操作</th></tr></thead><tbody>${list.map(s=>`<tr data-scene-id="${s.id}"><td><b>${esc(s.name)}</b><br><small class="muted">${esc(s.place)}</small></td><td>${esc(s.industry)}<br><small>${(s.photos||[]).length}图 / ${(s.videos||[]).length}视频</small></td><td><span class="pill ${s.deletedAt||s.enabled===false?'rejected':'approved'}">${sceneLifecycle(s)}</span><br><small>${esc(s.status)}</small></td><td>${sceneManagementActions(s)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">当前筛选下暂无场景。</div>'}`;
+}
+function sceneManagementActions(s){return `<button class="small-btn" onclick="showManagedScene('${s.id}')">查看</button> ${s.deletedAt?`<button class="small-btn" onclick="restoreScene('${s.id}')">恢复场景</button>`:`<button class="small-btn" onclick="openSceneEdit('${s.id}')">修改详情</button> <button class="small-btn" onclick="toggleScene('${s.id}')">${s.enabled===false?'启用':'停用'}</button> <button class="small-btn" style="color:#a23d3b" onclick="deleteScene('${s.id}')">删除</button>`}`;}
+function filterManagedScenes(filter){sceneListFilter=filter;document.getElementById('internalPanel').innerHTML=sceneManagementPanel();}
+function showManagedScene(id){
+ if(!isPlatformAdmin())return;const s=managedScene(id);if(!s)return alert('场景已更新，请刷新');
+ document.getElementById('modalContent').innerHTML=`<div class="kicker">${esc(s.industry)} · ${sceneLifecycle(s)}</div><h2>${esc(s.name)}</h2><p class="muted">${esc(s.desc)}</p><div class="detail-grid">${[['采集环境',s.place],['核心任务',s.task],['数据模态',s.data],['采集周期',s.cycle],['交付规模',s.scale],['采集状态',s.status]].map(([label,v])=>`<div class="detail"><small>${label}</small><b>${esc(v)}</b></div>`).join('')}</div><p>${(s.tags||[]).map(t=>`<span class="pill">${esc(t)}</span>`).join(' ')}</p><div class="gallery">${(s.photos||[]).map(p=>`<img src="${p}" alt="现场图片">`).join('')}${(s.videos||[]).map(v=>`<video controls preload="metadata" src="${v}"></video>`).join('')}</div><div>${sceneManagementActions(s)}</div>`;
+ document.getElementById('modal').classList.add('open');
+}
+const originalShowScene=showScene;
+showScene=function(id){if(isPlatformAdmin())showManagedScene(id);else originalShowScene(id);};
+const originalRenderLibrary=renderLibrary;
+renderLibrary=function(){originalRenderLibrary();if(role!=='internal')return;document.getElementById('readyMetric').textContent=scenes.filter(s=>s.enabled!==false&&s.status==='可立即采集').length;document.querySelectorAll('#sceneGrid .scene').forEach(card=>{const key=/showScene\('([^']+)'\)/.exec(card.getAttribute('onclick')||'')?.[1],s=scenes.find(x=>x.id===key);if(s?.enabled===false)card.querySelector('.scene-body').insertAdjacentHTML('afterbegin','<span class="pill rejected">已停用 · 客户不可见</span>');});};
+function openSceneEdit(id){
+ if(!isPlatformAdmin())return;const s=managedScene(id);if(!s||s.deletedAt)return alert('该场景已删除，请先恢复');
+ const fields=[['name','场景名称',200],['industry','所属行业',100],['place','采集环境',300],['data','数据模态',300],['cycle','采集周期',300],['scale','交付规模',300]];
+ document.getElementById('modalContent').innerHTML=`<h2>修改场景详情</h2><form class="form" id="sceneEditForm" onsubmit="saveSceneDetails(event,'${s.id}',${s.revision||0})"><div class="form-grid">${fields.map(([k,label,max])=>`<div class="field"><label>${label} *</label><input name="${k}" value="${esc(s[k])}" maxlength="${max}" required></div>`).join('')}<div class="field full"><label>核心任务 *</label><textarea name="task" rows="3" maxlength="2000" required>${esc(s.task)}</textarea></div><div class="field full"><label>场景介绍 *</label><textarea name="desc" rows="4" maxlength="4000" required>${esc(s.desc)}</textarea></div><div class="field"><label>采集状态</label><select name="status">${['可立即采集','方案评估中'].map(v=>`<option ${s.status===v?'selected':''}>${v}</option>`).join('')}</select></div><div class="field"><label>标签</label><input name="tags" value="${esc((s.tags||[]).join('，'))}"><small class="help">用逗号分隔，最多20个标签，每个不超过60字。</small></div></div><div class="notice" style="margin-top:16px">本次只修改文字详情，保留现有图片、视频及发布状态。</div><div id="sceneEditError" role="alert" style="color:#a23d3b"></div><button class="primary" style="margin-top:10px">保存修改</button></form>`;
+ document.getElementById('modal').classList.add('open');
+}
+async function saveSceneDetails(e,id,revision){
+ e.preventDefault();const f=e.target,details={},button=f.querySelector('button');for(const k of ['name','industry','place','data','cycle','scale','task','desc','status'])details[k]=f.elements[k].value.trim();details.tags=f.elements.tags.value.split(/[,，]/).map(x=>x.trim()).filter(Boolean);button.disabled=true;
+ try{await api('/api/action',{action:'sceneEdit',data:{id,revision,details}});closeModal();await refreshState();switchView('workbench');showInternalTab('scenes',document.querySelector('[data-internal-tab="scenes"]'));}
+ catch(err){f.querySelector('#sceneEditError').textContent=err.message;if(err.status===409)await refreshState().catch(()=>{});if(err.status===401){clearState();openLogin();}}finally{button.disabled=false;}
+}
+async function toggleScene(id){const s=managedScene(id);if(!isPlatformAdmin()||!s||s.deletedAt)return;if(s.enabled!==false&&!confirm(`停用“${s.name}”？客户将无法查看，相关未领取任务将暂停开放，已有素材与历史记录保留。`))return;await perform('sceneToggle',{id,revision:s.revision||0,enabled:s.enabled===false},{close:true,tab:'scenes'});}
+async function deleteScene(id){const s=managedScene(id);if(!isPlatformAdmin()||!s||s.deletedAt)return;if(!confirm(`删除“${s.name}”？场景会从客户场景库移除，图片、视频与历史记录保留，可在“已删除”列表恢复。`))return;await perform('sceneDelete',{id,revision:s.revision||0},{close:true,tab:'scenes'});}
+async function restoreScene(id){const s=managedScene(id);if(!isPlatformAdmin()||!s?.deletedAt)return;await perform('sceneRestore',{id,revision:s.revision||0},{close:true,tab:'scenes'});}
+const originalTaskForm=openTaskForm;
+openTaskForm=async function(){if(!scenes.some(s=>!s.deletedAt&&s.enabled!==false))return alert('暂无已启用场景，请先启用或审核场景');await originalTaskForm();const select=document.querySelector('#modalContent select[name="sceneId"]');if(select)[...select.options].forEach(option=>{const s=scenes.find(x=>x.id===option.value);if(!s||s.deletedAt||s.enabled===false)option.remove();});};
+inquiriesPanel=function(){return inquiries.length?`<table class="table"><thead><tr><th>场景</th><th>客户联系方式</th><th>提交日期</th></tr></thead><tbody>${inquiries.map(x=>`<tr><td>${esc(x.sceneName||scenes.find(s=>s.id===x.sceneId)?.name||'已归档场景')}</td><td>${esc(x.contact)}</td><td>${esc(x.date)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">尚未收到客户询盘。</div>';};
+clientHTML=function(){return `<div class="section-head"><h1>客户资料与询盘</h1></div><div class="notice">查看已启用场景的图片、视频与相关资料，提交采集需求。</div><h2>我的询盘</h2>${inquiries.length?`<table class="table"><thead><tr><th>场景</th><th>提交时间</th><th>状态</th></tr></thead><tbody>${inquiries.map(x=>`<tr><td>${esc(x.sceneName||scenes.find(s=>s.id===x.sceneId)?.name||'已归档场景')}</td><td>${esc(x.date)}</td><td>已收到</td></tr>`).join('')}</tbody></table>`:'<div class="empty">尚未提交询盘。</div>'}`;};
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&session&&!document.getElementById('modal').classList.contains('open'))refreshState().catch(e=>{if(e.status===401){clearState();openLogin();}});});
 bootstrap();

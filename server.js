@@ -23,10 +23,42 @@ const digest=t=>crypto.createHash('sha256').update(t).digest('hex');
 function account(req){const t=token(req);if(!t)return null;const s=db.prepare('SELECT * FROM sessions WHERE token=? AND expires>?').get(digest(t),Date.now()),a=s&&get('accounts',s.accountId);return a?.status==='启用'?a:null;}
 const internal=a=>['平台管理员','内部运营'].includes(a.role);
 function permit(a,roles){if(!roles.includes(a.role))fail(403,'当前账号没有此操作权限');}
-function state(a){return{me:safe(a),scenes:all('scenes'),applications:internal(a)?all('applications'):all('applications').filter(x=>x.ownerId===a.id),tasks:internal(a)?all('tasks'):a.role==='供应商'?all('tasks').filter(t=>t.stage==='待领取'||t.supplierId===a.id):[],inquiries:internal(a)?all('inquiries'):all('inquiries').filter(x=>x.ownerId===a.id),accounts:a.role==='平台管理员'?all('accounts').map(safe):[safe(a)]};}
+// Legacy scenes have no lifecycle fields and remain enabled without a destructive migration.
+const scenePublished=s=>!!s&&!s.deletedAt&&s.enabled!==false;
+function state(a){
+ const sceneList=all('scenes'), visible=sceneList.filter(s=>!s.deletedAt&&(internal(a)||scenePublished(s)));
+ const poolVisible=t=>t.stage==='待领取'&&scenePublished(get('scenes',t.sceneId));
+ const inquiryList=internal(a)?all('inquiries'):all('inquiries').filter(x=>x.ownerId===a.id);
+ return{me:safe(a),scenes:visible,archivedScenes:a.role==='平台管理员'?sceneList.filter(s=>s.deletedAt):[],
+  applications:internal(a)?all('applications'):all('applications').filter(x=>x.ownerId===a.id),
+  tasks:internal(a)?all('tasks'):a.role==='供应商'?all('tasks').filter(t=>poolVisible(t)||t.supplierId===a.id):[],
+  inquiries:inquiryList.map(x=>({...x,sceneName:x.sceneName||get('scenes',x.sceneId)?.name||'已归档场景'})),
+  accounts:a.role==='平台管理员'?all('accounts').map(safe):[safe(a)]};
+}
 function mediaRefs(urls,a,kind){if(!Array.isArray(urls)||urls.length>20)fail(400,'每类素材最多20个');return urls.map(url=>{const key=/^\/media\/([a-f0-9-]{36})$/.exec(url)?.[1],m=key&&db.prepare('SELECT * FROM media WHERE id=?').get(key);if(!m||m.owner!==a.id||!m.mime.startsWith(kind+'/'))fail(400,'素材不存在或不属于当前账号');return url;});}
 const scopes={'平台管理员':'全部权限','内部运营':'场景审核、任务管理','供应商':'申报、领取与执行任务','客户':'场景库、询盘'};
 function action(a,name,b){
+ if(['sceneEdit','sceneToggle','sceneDelete','sceneRestore'].includes(name)){
+  permit(a,['平台管理员']);
+  const scene=get('scenes',b.id);if(!scene)fail(404,'场景不存在');
+  if(!Number.isInteger(b.revision)||b.revision!==(scene.revision||0))fail(409,'场景已被其他操作更新，请刷新后重试');
+  if(name==='sceneRestore'?!scene.deletedAt:!!scene.deletedAt)fail(409,name==='sceneRestore'?'该场景未删除':'该场景已删除，请先恢复');
+  const before=JSON.parse(JSON.stringify(scene));
+  if(name==='sceneEdit'){
+   const details=b.details||{};
+   if(!['可立即采集','方案评估中'].includes(details.status))fail(400,'采集状态无效');
+   const updated={name:value(details.name,'场景名称',200),industry:value(details.industry,'所属行业',100),place:value(details.place,'采集环境',300),task:value(details.task,'核心任务'),data:value(details.data,'数据模态',300),cycle:value(details.cycle,'采集周期',300),scale:value(details.scale,'交付规模',300),desc:value(details.desc,'场景介绍',4000),status:details.status};
+   if(!Array.isArray(details.tags)||details.tags.length>20||details.tags.some(t=>typeof t!=='string'||!t.trim()||t.length>60))fail(400,'场景标签最多20个，每个不超过60字');
+   updated.tags=[...new Set(details.tags.map(t=>t.trim()))];Object.assign(scene,updated);
+  }
+  if(name==='sceneToggle'){if(typeof b.enabled!=='boolean')fail(400,'启用状态无效');if((scene.enabled!==false)===b.enabled)fail(409,'场景已经处于该状态');scene.enabled=b.enabled;}
+  if(name==='sceneDelete'){scene.deletedAt=new Date().toISOString();scene.deletedBy=a.id;}
+  // Restoring an archived scene does not silently republish it to customers.
+  if(name==='sceneRestore'){delete scene.deletedAt;delete scene.deletedBy;scene.enabled=false;}
+  scene.revision=(scene.revision||0)+1;scene.updatedAt=new Date().toISOString();scene.updatedBy=a.id;
+  put('sceneChanges',{id:id(),sceneId:scene.id,action:name,actorId:a.id,at:scene.updatedAt,before,after:JSON.parse(JSON.stringify(scene))});
+  return put('scenes',scene);
+ }
  if(name==='apply'){
   permit(a,['供应商']);const photos=mediaRefs(b.photos,a,'image'),videos=mediaRefs(b.videos,a,'video');if(!photos.length)fail(400,'至少上传一张现场图片');
   const previous=b.id&&get('applications',b.id);if(b.id&&(!previous||previous.ownerId!==a.id))fail(403,'不能修改其他账号的申报');if(previous&&previous.status!=='已退回')fail(409,'仅退回的申报可以修改重提');
@@ -37,18 +69,18 @@ function action(a,name,b){
   app.status=b.decision==='approve'?'已通过':'已退回';app.reviewedBy=a.id;app.reviewedAt=new Date().toISOString();app.reviewNote=String(b.note||'').slice(0,2000);
   if(b.decision==='approve')put('scenes',{id:id(),applicationId:app.id,name:app.name,industry:app.industry,status:'可立即采集',place:app.place,task:app.task,data:app.data,cycle:app.period||'待确认',scale:'待评估',type:'custom-cover',tags:['供应商申报'],desc:app.note||app.task,photos:app.photos,videos:app.videos});return put('applications',app);
  }
- if(name==='inquiry'){permit(a,['客户']);if(!get('scenes',b.sceneId))fail(404,'场景不存在');return put('inquiries',{id:id(),ownerId:a.id,sceneId:b.sceneId,contact:value(b.contact,'联系方式',300),date:date()});}
+ if(name==='inquiry'){permit(a,['客户']);const scene=get('scenes',b.sceneId);if(!scenePublished(scene))fail(404,'场景已停用或删除');return put('inquiries',{id:id(),ownerId:a.id,sceneId:b.sceneId,sceneName:scene.name,contact:value(b.contact,'联系方式',300),date:date()});}
  if(name==='account'){
   permit(a,['平台管理员']);const old=b.id&&get('accounts',b.id);if(b.id&&!old)fail(404,'账号不存在');if(!Object.hasOwn(scopes,b.role))fail(400,'角色无效');const email=value(b.email,'邮箱',200).toLowerCase();if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))fail(400,'邮箱格式无效');if(all('accounts').some(x=>x.email===email&&x.id!==old?.id))fail(409,'邮箱已被使用');if(old?.id===a.id&&b.role!=='平台管理员')fail(400,'不能降低当前管理员自身权限');
   const passwordHash=b.password?hash(b.password):old?.passwordHash;if(!passwordHash)fail(400,'新账号需要设置至少12位密码');const saved=put('accounts',{id:old?.id||id(),name:value(b.name,'名称',200),email,role:b.role,org:value(b.org,'组织',200),scope:scopes[b.role],status:old?.status||'启用',passwordHash});if(old&&(b.password||old.role!==saved.role))db.prepare('DELETE FROM sessions WHERE accountId=?').run(old.id);return safe(saved);
  }
  if(name==='toggleAccount'){permit(a,['平台管理员']);const target=get('accounts',b.id);if(!target)fail(404,'账号不存在');if(target.id===a.id)fail(400,'不能停用当前管理员');target.status=target.status==='启用'?'停用':'启用';db.prepare('DELETE FROM sessions WHERE accountId=?').run(target.id);return safe(put('accounts',target));}
  if(name==='task'){
-  permit(a,['平台管理员','内部运营']);const scene=get('scenes',b.sceneId);if(!scene)fail(400,'请选择已审核场景');if(!['pool','assigned'].includes(b.mode))fail(400,'下发方式无效');const supplier=b.mode==='assigned'&&get('accounts',b.supplierId);if(b.mode==='assigned'&&(!supplier||supplier.role!=='供应商'||supplier.status!=='启用'))fail(400,'请选择启用的供应商');return put('tasks',{id:id(),name:scene.name,sceneId:scene.id,stage:supplier?'已排期':'待领取',supplierId:supplier?.id||'',supplier:supplier?.org||'',owner:String(b.owner||'').slice(0,200),date:value(b.date,'计划周期',200),progress:0});
+  permit(a,['平台管理员','内部运营']);const scene=get('scenes',b.sceneId);if(!scenePublished(scene))fail(400,'请选择已启用的审核场景');if(!['pool','assigned'].includes(b.mode))fail(400,'下发方式无效');const supplier=b.mode==='assigned'&&get('accounts',b.supplierId);if(b.mode==='assigned'&&(!supplier||supplier.role!=='供应商'||supplier.status!=='启用'))fail(400,'请选择启用的供应商');return put('tasks',{id:id(),name:scene.name,sceneId:scene.id,stage:supplier?'已排期':'待领取',supplierId:supplier?.id||'',supplier:supplier?.org||'',owner:String(b.owner||'').slice(0,200),date:value(b.date,'计划周期',200),progress:0});
  }
  if(['claim','start','advance'].includes(name)){
   const t=get('tasks',b.id);if(!t)fail(404,'任务不存在');
-  if(name==='claim'){permit(a,['供应商']);if(t.stage!=='待领取'||t.supplierId)fail(409,'该任务已被领取');t.supplierId=a.id;t.supplier=a.org;t.stage='已排期';}
+  if(name==='claim'){permit(a,['供应商']);if(!scenePublished(get('scenes',t.sceneId)))fail(409,'关联场景已停用或删除，不能领取');if(t.stage!=='待领取'||t.supplierId)fail(409,'该任务已被领取');t.supplierId=a.id;t.supplier=a.org;t.stage='已排期';}
   if(name==='start'){permit(a,['供应商']);if(t.supplierId!==a.id)fail(403,'仅能执行自己的任务');if(t.stage!=='已排期')fail(409,'当前任务不能开始');t.stage='采集中';t.progress=10;}
   if(name==='advance'){permit(a,['平台管理员','内部运营']);if(t.stage==='待领取')fail(400,'请先由供应商领取或指派');const steps=['已排期','采集中','验收交付'];t.stage=steps[Math.min(steps.indexOf(t.stage)+1,2)];t.progress=t.stage==='验收交付'?100:10;}
   return put('tasks',t);
@@ -68,7 +100,7 @@ async function upload(req,res,a,url){
  finally{activeUploads--;reservedBytes-=declared;}
 }
 function serveMedia(req,res,a,key){
- const m=db.prepare('SELECT * FROM media WHERE id=?').get(key);if(!m)fail(404,'素材不存在');const url='/media/'+key,published=all('scenes').some(x=>[...(x.photos||[]),...(x.videos||[])].includes(url));if(!internal(a)&&m.owner!==a.id&&!published)fail(403,'素材尚未审核或不属于当前账号');const file=path.join(mediaDir,key);if(!fs.existsSync(file))fail(404,'素材文件缺失');let start=0,end=m.size-1,status=200;
+ const m=db.prepare('SELECT * FROM media WHERE id=?').get(key);if(!m)fail(404,'素材不存在');const url='/media/'+key,published=all('scenes').some(x=>scenePublished(x)&&[...(x.photos||[]),...(x.videos||[])].includes(url));if(!internal(a)&&m.owner!==a.id&&!published)fail(403,'素材未公开、场景已下架或不属于当前账号');const file=path.join(mediaDir,key);if(!fs.existsSync(file))fail(404,'素材文件缺失');let start=0,end=m.size-1,status=200;
  if(req.headers.range){const r=/^bytes=(\d*)-(\d*)$/.exec(req.headers.range);if(!r||(!r[1]&&!r[2])){res.writeHead(416,{'Content-Range':`bytes */${m.size}`});return res.end();}start=r[1]?Number(r[1]):Math.max(0,m.size-Number(r[2]));if(r[1]&&r[2])end=Math.min(end,Number(r[2]));if(start>end||start>=m.size){res.writeHead(416,{'Content-Range':`bytes */${m.size}`});return res.end();}status=206;}
  const headers={'Content-Type':m.mime,'Content-Length':end-start+1,'Accept-Ranges':'bytes','Cache-Control':'private, no-store','Content-Disposition':'inline'};if(status===206)headers['Content-Range']=`bytes ${start}-${end}/${m.size}`;res.writeHead(status,headers);if(req.method==='HEAD')return res.end();fs.createReadStream(file,{start,end}).on('error',()=>res.destroy()).pipe(res);
 }
